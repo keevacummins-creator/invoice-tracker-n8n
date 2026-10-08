@@ -1,0 +1,300 @@
+{
+  "name": "Auto Invoice Tracker",
+  "nodes": [
+    {
+      "id": "3919b003-6a5b-4fdb-ac70-b3efc06bb6d0",
+      "name": "1. Every morning at 8",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 304],
+      "parameters": {
+        "rule": {
+          "interval": [{ "triggerAtHour": 8 }]
+        }
+      }
+    },
+    {
+      "id": "6b9b065e-9a21-4eea-a8b6-e240762ee5dc",
+      "name": "2. Find recent invoice emails",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [240, 304],
+      "parameters": {
+        "operation": "getAll",
+        "simple": false,
+        "filters": {
+          "q": "(has:attachment filename:pdf) OR subject:(invoice OR receipt OR \"order confirmation\" OR \"booking confirmation\" OR itinerary OR ticket OR factuur OR bestelling OR rekening OR quittung OR rechnung OR recibo OR \"confirmación de pedido\" OR ricevuta OR fattura)",
+          "readStatus": "both",
+          "receivedAfter": "={{ $now.minus({ days: $execution.mode === 'test' ? 30 : 1 }).toISO() }}"
+        },
+        "options": {
+          "dataPropertyAttachmentsPrefixName": "attachment_",
+          "downloadAttachments": true
+        }
+      }
+    },
+    {
+      "id": "f8720bf4-8d8b-4557-b0f4-5a18eb4175c8",
+      "name": "3. Has a PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [464, 304],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ ($binary?.attachment_0?.mimeType || '') === 'application/pdf' }}",
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "dfd063cf-8224-44ae-844c-10abc5b82ae9",
+      "name": "4. Read the PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [704, 192],
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "attachment_0",
+        "options": { "joinPages": true }
+      }
+    },
+    {
+      "id": "5650c458-bf73-4505-940f-4fe2a4f5520a",
+      "name": "4b. No PDF: use email text",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [704, 432],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "doc-text",
+              "name": "documentText",
+              "value": "={{ ($json.text || $json.html || $json.snippet || '').slice(0, 15000) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "2415b514-36e0-43d6-8da1-47c9f08285dc",
+      "name": "5. Combine",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [944, 304],
+      "parameters": {}
+    },
+    {
+      "id": "c7d4756f-4fbe-4f2e-8215-c0644391bf22",
+      "name": "6. Claude reads it",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [1184, 304],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Look at this email and decide if it is genuinely an invoice, receipt, or order confirmation that shows a price paid or owed. If it is, extract the details. If it is just a shipping notice, newsletter, or promo with no purchase amount, set isReceipt to false.\n\nEmail subject: {{ $('3. Has a PDF?').item.json.subject }}\n\nEmail/document content:\n{{ ($json.documentText || $json.text || '').slice(0, 15000) }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You extract structured purchase data (invoices, receipts, order confirmations) from emails, in any language, for expense and spending tracking. Only extract what is explicitly present - use null for anything not found, never guess. Set isReceipt to false for shipping/delivery notices, marketing emails, or anything without an actual price paid. Categorize into one of: Flight, Hotel, Taxi, Train, Meals, Shopping, Subscription, Other. Amount should be a plain number (convert comma decimals like 231,39 to 231.39)."
+        }
+      }
+    },
+    {
+      "id": "70183e31-3eec-47ca-803d-7fc54b04edef",
+      "name": "Claude Sonnet 4.5",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [1184, 512],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-5-20250929",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fd6d3c88-fb97-4826-ad4e-27ed5684159b",
+      "name": "Vendor, amount, date…",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [1344, 512],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"isReceipt\":{\"type\":\"boolean\"},\"vendor\":{\"type\":[\"string\",\"null\"]},\"invoiceNumber\":{\"type\":[\"string\",\"null\"]},\"invoiceDate\":{\"type\":[\"string\",\"null\"]},\"amount\":{\"type\":[\"number\",\"null\"]},\"currency\":{\"type\":[\"string\",\"null\"]},\"category\":{\"type\":[\"string\",\"null\"]},\"description\":{\"type\":[\"string\",\"null\"]}},\"required\":[\"isReceipt\"]}"
+      }
+    },
+    {
+      "id": "03f926a2-698a-4e78-b6e3-3218dfe2f0a2",
+      "name": "7. Real receipt?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1504, 304],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.output.isReceipt }}",
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fa9fe608-1bdc-48ee-a211-209255614821",
+      "name": "8. Add row to tracker",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1728, 304],
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Gmail invoices",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date Received": "={{ $('3. Has a PDF?').item.json.date }}",
+            "Vendor": "={{ $json.output.vendor }}",
+            "Invoice Number": "={{ $json.output.invoiceNumber }}",
+            "Invoice Date": "={{ $json.output.invoiceDate }}",
+            "Amount": "={{ $json.output.amount }}",
+            "Currency": "={{ $json.output.currency }}",
+            "Category": "={{ $json.output.category }}",
+            "Description": "={{ $json.output.description }}",
+            "Gmail Link": "={{ 'https://mail.google.com/mail/u/0/#all/' + $('3. Has a PDF?').item.json.threadId }}"
+          },
+          "matchingColumns": ["Gmail Link"],
+          "schema": [
+            { "id": "Date Received", "displayName": "Date Received", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Vendor", "displayName": "Vendor", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Invoice Number", "displayName": "Invoice Number", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Invoice Date", "displayName": "Invoice Date", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Amount", "displayName": "Amount", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Currency", "displayName": "Currency", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Category", "displayName": "Category", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Description", "displayName": "Description", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Gmail Link", "displayName": "Gmail Link", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "30782d22-01a5-46cc-ba78-489e3b60b7ad",
+      "name": "Section: Find invoice emails",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-80, 80],
+      "parameters": {
+        "content": "## Find invoice emails\nRuns every morning and checks the last day's emails. Click **Execute workflow** to catch up on the last 30 days.",
+        "width": 470,
+        "height": 500,
+        "color": 7
+      }
+    },
+    {
+      "id": "ef49ea22-459c-48b6-b384-c247afb73bb8",
+      "name": "Section: Read each one",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [420, 80],
+      "parameters": {
+        "content": "## Read each one\nIf there's a PDF, read it. If not, use the email text.",
+        "width": 660,
+        "height": 540,
+        "color": 7
+      }
+    },
+    {
+      "id": "55447b1a-ce5d-43ae-86ed-ec3fab4a09ad",
+      "name": "Section: Claude checks and saves",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1110, 80],
+      "parameters": {
+        "content": "## Claude checks and saves\nClaude pulls out vendor, amount, date and category, skips anything that isn't a real receipt, and adds a row to the tracker.",
+        "width": 760,
+        "height": 600,
+        "color": 7
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Every morning at 8": {
+      "main": [[{ "node": "2. Find recent invoice emails", "type": "main", "index": 0 }]]
+    },
+    "2. Find recent invoice emails": {
+      "main": [[{ "node": "3. Has a PDF?", "type": "main", "index": 0 }]]
+    },
+    "3. Has a PDF?": {
+      "main": [
+        [{ "node": "4. Read the PDF", "type": "main", "index": 0 }],
+        [{ "node": "4b. No PDF: use email text", "type": "main", "index": 0 }]
+      ]
+    },
+    "4. Read the PDF": {
+      "main": [[{ "node": "5. Combine", "type": "main", "index": 0 }]]
+    },
+    "4b. No PDF: use email text": {
+      "main": [[{ "node": "5. Combine", "type": "main", "index": 1 }]]
+    },
+    "5. Combine": {
+      "main": [[{ "node": "6. Claude reads it", "type": "main", "index": 0 }]]
+    },
+    "6. Claude reads it": {
+      "main": [[{ "node": "7. Real receipt?", "type": "main", "index": 0 }]]
+    },
+    "7. Real receipt?": {
+      "main": [[{ "node": "8. Add row to tracker", "type": "main", "index": 0 }]]
+    },
+    "Claude Sonnet 4.5": {
+      "ai_languageModel": [[{ "node": "6. Claude reads it", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Vendor, amount, date…": {
+      "ai_outputParser": [[{ "node": "6. Claude reads it", "type": "ai_outputParser", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "tags": []
+}
